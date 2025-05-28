@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>x18 Operation Center</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f4f4f4;
+    }
+    #callNotification {
+      display: none;
+      background-color: #ffeb3b;
+      padding: 15px;
+      margin-bottom: 20px;
+      border-radius: 5px;
+    }
+    #callStatus {
+      margin-top: 20px;
+      font-weight: bold;
+    }
+    button {
+      padding: 10px 20px;
+      margin: 5px;
+      cursor: pointer;
+      border: none;
+      border-radius: 5px;
+      background-color: #007bff;
+      color: white;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <h1>x18 Operation Center</h1>
+  <div id="callNotification">
+    Incoming call from <span id="callerId"></span>
+    <button id="acceptCall">Accept Call</button>
+  </div>
+  <div id="callStatus">No active call</div>
+  <div>
+    <button id="muteButton" disabled>Mute</button>
+    <button id="endCallButton" disabled>End Call</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/dist/socket.io.min.js"></script>
+  <script>
+    const socket = io('http://localhost:4000', { path: '/socket.io', transports: ['websocket', 'polling'], query: { role: 'operation_center' } });
+    let peerConnection;
+    let localStream;
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        // Uncomment after setting up Coturn
+        // { urls: 'turn:127.0.0.1:3456', username: 'user', credential: 'testpass' }
+      ]
+    };
+
+    // UI elements
+    const callNotification = document.getElementById('callNotification');
+    const callerIdSpan = document.getElementById('callerId');
+    const acceptCallButton = document.getElementById('acceptCall');
+    const callStatus = document.getElementById('callStatus');
+    const muteButton = document.getElementById('muteButton');
+    const endCallButton = document.getElementById('endCallButton');
+
+    // Socket.IO events
+    socket.on('connect', () => {
+      console.log('Connected to signaling server, socket ID:', socket.id);
+      socket.emit('join', 'operation_center');
+    });
+
+    socket.on('connect_error', (error) => {
+      console.log('Connect error:', error);
+      callStatus.textContent = 'Connection failed';
+    });
+
+    socket.on('offer', async (data) => {
+      console.log('Received offer from:', data.from, 'SDP:', data.sdp.substring(0, 50) + '...');
+      callerIdSpan.textContent = data.from;
+      callNotification.style.display = 'block';
+      callStatus.textContent = 'Incoming call...';
+
+      acceptCallButton.onclick = async () => {
+        callNotification.style.display = 'none';
+        callStatus.textContent = 'Connecting...';
+
+        peerConnection = new RTCPeerConnection(configuration);
+        setupPeerConnection();
+
+        // Set remote description
+        try {
+          await peerConnection.setRemoteDescription(
+            new RTCSessionDescription({ sdp: data.sdp, type: data.type })
+          );
+          console.log('Set remote description');
+        } catch (e) {
+          console.error('Error setting remote description:', e);
+          callStatus.textContent = 'Call failed';
+          return;
+        }
+
+        // Get local audio stream
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          localStream.getTracks().forEach((track) => {
+            peerConnection.addTrack(track, localStream);
+            console.log('Added track:', track.kind);
+          });
+        } catch (e) {
+          console.error('Error getting local audio stream:', e);
+          callStatus.textContent = 'Media failed';
+          return;
+        }
+
+        // Create and send answer
+        try {
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          console.log('Answer SDP:', answer.sdp.substring(0, 50) + '...');
+          socket.emit('answer', {
+            sdp: answer.sdp,
+            type: answer.type,
+            to: data.from
+          });
+        } catch (e) {
+          console.error('Error creating answer:', e);
+          callStatus.textContent = 'Call failed';
+          return;
+        }
+      };
+    });
+
+    socket.on('answer', async (data) => {
+      console.log('Received answer, SDP:', data.sdp.substring(0, 50) + '...');
+      try {
+        await peerConnection.setRemoteDescription(
+          new RTCSessionDescription({ sdp: data.sdp, type: data.type })
+        );
+        console.log('Set remote answer');
+      } catch (e) {
+        console.error('Error setting remote answer:', e);
+      }
+    });
+
+    socket.on('ice-candidate', async (data) => {
+      console.log('Received ICE candidate:', data.candidate);
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate({
+          candidate: data.candidate,
+          sdpMid: data.sdpMid,
+          sdpMLineIndex: data.sdpMLineIndex
+        }));
+        console.log('Added ICE candidate');
+      } catch (e) {
+        console.error('Error adding ICE candidate:', e);
+      }
+    });
+
+    socket.on('end-call', () => {
+      console.log('Remote ended call');
+      endCall();
+    });
+
+    // Peer connection setup
+    function setupPeerConnection() {
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log('Sending ICE candidate:', event.candidate.candidate);
+          socket.emit('ice-candidate', {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            to: callerIdSpan.textContent
+          });
+        } else {
+          console.log('ICE candidate gathering complete');
+        }
+      };
+
+      peerConnection.ontrack = (event) => {
+        console.log('Received remote audio stream, tracks:', event.streams[0].getTracks().length);
+        callStatus.textContent = 'Call connected';
+        muteButton.disabled = false;
+        endCallButton.disabled = false;
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log('ICE state:', peerConnection.iceConnectionState);
+        if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
+          callStatus.textContent = 'Call connected';
+          muteButton.disabled = false;
+          endCallButton.disabled = false;
+        } else if (peerConnection.iceConnectionState === 'failed' || peerConnection.iceConnectionState === 'disconnected') {
+          callStatus.textContent = 'Call failed';
+          endCall();
+        }
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        console.log('Connection state:', peerConnection.connectionState);
+      };
+    }
+
+    // Mute button
+    let isMuted = false;
+    muteButton.onclick = () => {
+      isMuted = !isMuted;
+      if (localStream) {
+        localStream.getAudioTracks().forEach((track) => {
+          track.enabled = !isMuted;
+        });
+      }
+      muteButton.textContent = isMuted ? 'Unmute' : 'Mute';
+    };
+
+    // End call
+    endCallButton.onclick = endCall;
+
+    function endCall() {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((track) => track.stop());
+        localStream = null;
+      }
+      callStatus.textContent = 'No active call';
+      callNotification.style.display = 'none';
+      muteButton.disabled = true;
+      endCallButton.disabled = true;
+      muteButton.textContent = 'Mute';
+      isMuted = false;
+      socket.emit('end-call');
+    }
+  </script>
+</body>
+</html>

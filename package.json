@@ -1,0 +1,23 @@
+{
+  "name": "x18-operation-center",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "dev-hot": "bun run --hot src/index.ts",
+    "build": "bun build --compile --target=bun-linux-x64 ./src/index.ts --outfile x18-operation-center"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0",
+    "hono": "^4.7.10",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.14",
+    "@types/node": "^22.15.21"
+  },
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
